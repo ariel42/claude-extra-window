@@ -1,14 +1,15 @@
 """
 Claude Code Extra Window
-Keeps a Claude Code usage window ticking in the background so that a fresh full
-window is always imminent when you sit down to work. Requires Python 3.6+,
-Linux, and the Claude Code CLI.
+Keeps a Claude Code usage window rolling in the background so that you start work
+inside a fresh, almost-untouched window. Requires Python 3.6+, Linux, and the
+Claude Code CLI.
 
 Usage:
   python3 claude_extra_window.py --init   # one-time setup (called by install.sh)
   python3 claude_extra_window.py          # extra-window run (called by systemd timer)
 """
 
+import json
 import os
 import pty
 import shutil
@@ -39,16 +40,36 @@ LOG_FILE          = os.path.join(SCRIPT_DIR, "claude_extra_window.log")
 SESSION_ID_FILE   = os.path.join(SCRIPT_DIR, "extra_window_session_id.txt")
 CHECKPOINT_BACKUP = os.path.join(SCRIPT_DIR, "extra_window_checkpoint.jsonl.bak")
 
-CLAUDE_ENV = {
-    "HOME":  HOME,
-    "PATH":  os.path.join(HOME, ".local", "bin")
-             + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    "TERM":  "xterm-256color",
-    "USER":  USER,
-    "SHELL": "/bin/bash",
-}
-
 LOG_RETENTION_HOURS = 48
+
+
+# Environment variables to pass through to the Claude subprocess *if* present.
+# These cover keychain-based OAuth on Linux (D-Bus / XDG) and locale; nothing here
+# affects billing. We deliberately do NOT inherit the full environment: vars like
+# CLAUDECODE / CLAUDE_CODE_CHILD_SESSION (set when this script itself is launched
+# from within Claude Code) make the child behave as a nested session and silently
+# disable session persistence, and ANTHROPIC_API_KEY would divert billing to the
+# pay-as-you-go API instead of the subscription window.
+_ENV_PASSTHROUGH = (
+    "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "LANG", "LC_ALL", "LC_CTYPE",
+)
+
+
+def build_claude_env():
+    """Build a clean, minimal environment for the Claude subprocess."""
+    env = {
+        "HOME":  HOME,
+        "USER":  USER,
+        "TERM":  "xterm-256color",
+        "SHELL": "/bin/bash",
+        "PATH":  os.path.join(HOME, ".local", "bin")
+                 + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    }
+    for key in _ENV_PASSTHROUGH:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +111,27 @@ def _session_file(session_id):
     return os.path.join(SESSION_DIR, f"{session_id}.jsonl")
 
 
+def _assistant_entries(session_id):
+    """Return the (deduplicated) assistant-turn objects recorded in the session file."""
+    path = _session_file(session_id)
+    if not os.path.exists(path):
+        return []
+    entries, seen = [], set()
+    with open(path) as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("type") == "assistant":
+                uid = obj.get("uuid")
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                entries.append(obj)
+    return entries
+
+
 def backup_checkpoint(session_id):
     src = _session_file(session_id)
     shutil.copy2(src, CHECKPOINT_BACKUP)
@@ -105,11 +147,22 @@ def restore_checkpoint(session_id):
 # Interactive Claude session (PTY)
 # ---------------------------------------------------------------------------
 
-def run_interactive(extra_args, prompt_text, startup_wait=6, response_wait=8):
+def run_interactive(extra_args, prompt_text, session_id,
+                    startup_wait=8, completion_timeout=60):
     """
-    Spawn an interactive Claude session in a PTY, send prompt_text, then /exit.
-    Uses --tools "" to minimise the system-prompt token footprint.
-    Returns True on clean exit (code 0), False otherwise.
+    Spawn an interactive Claude session in a PTY, send prompt_text, wait for the
+    reply to settle, then /exit and verify the turn was recorded.
+
+      * --tools ""                       strips built-in tool definitions
+      * --strict-mcp-config --mcp-config minimises the system prompt to no MCP servers
+      * --model haiku --effort low       cheapest possible turn
+
+    Completion is detected adaptively from PTY output (output appears, then goes
+    quiet) rather than by a fixed sleep. Claude Code only flushes the session JSONL
+    on exit, so success is confirmed *after* /exit by checking that a new assistant
+    turn was persisted; its token usage is logged (cache read, which is
+    rate-limit-exempt, vs cache write) so each run's real cost is visible.
+    Returns True only if a new assistant turn was recorded.
     """
     if not os.path.isfile(CLAUDE_PATH):
         log(f"ERROR: Claude CLI not found at {CLAUDE_PATH}. "
@@ -117,7 +170,10 @@ def run_interactive(extra_args, prompt_text, startup_wait=6, response_wait=8):
         return False
 
     master_fd, slave_fd = pty.openpty()
-    cmd = [CLAUDE_PATH, "--tools", "", "--model", "haiku", "--effort", "low"] + extra_args
+    cmd = [CLAUDE_PATH,
+           "--tools", "",
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+           "--model", "haiku", "--effort", "low"] + extra_args
 
     try:
         proc = subprocess.Popen(
@@ -127,7 +183,7 @@ def run_interactive(extra_args, prompt_text, startup_wait=6, response_wait=8):
             stderr=slave_fd,
             cwd=SCRIPT_DIR,
             preexec_fn=os.setsid,
-            env=CLAUDE_ENV,
+            env=build_claude_env(),
         )
     except Exception as e:
         log(f"ERROR: Failed to spawn Claude: {e}")
@@ -144,15 +200,36 @@ def run_interactive(extra_args, prompt_text, startup_wait=6, response_wait=8):
     except BlockingIOError:
         pass
 
+    # Claude Code only persists the session JSONL on a clean exit, not mid-run, so
+    # completion can't be detected by watching the file. Instead we wait on the PTY:
+    # the turn is done once output has gone quiet for `idle_threshold` seconds. We
+    # also enforce `min_settle` first, because the gap before the model starts
+    # replying (especially on a cache miss, e.g. the very first ping) can be several
+    # seconds with no output — exiting during that gap would abort the turn.
+    # Draining the PTY throughout also keeps the child from blocking on a full buffer.
+    baseline = len(_assistant_entries(session_id))
     log(f"Sending: '{prompt_text}'")
     os.write(master_fd, (prompt_text + "\r").encode())
 
-    time.sleep(response_wait)
-    try:
-        snippet = os.read(master_fd, 8192).decode("utf-8", errors="ignore")
-        log(f"Response snippet: {snippet.replace(chr(10), ' ').strip()[:80]}")
-    except BlockingIOError:
-        log("Response buffer empty")
+    min_settle = 10.0
+    idle_threshold = 5.0
+    start = time.time()
+    deadline = start + completion_timeout
+    last_activity = start
+    saw_output = False
+    while time.time() < deadline:
+        time.sleep(0.5)
+        try:
+            chunk = os.read(master_fd, 65536)
+        except BlockingIOError:
+            chunk = b""
+        if chunk:
+            saw_output = True
+            last_activity = time.time()
+        elif (saw_output
+              and (time.time() - start) >= min_settle
+              and (time.time() - last_activity) >= idle_threshold):
+            break  # output settled — turn finished
 
     os.write(master_fd, b"/exit\r")
 
@@ -171,8 +248,28 @@ def run_interactive(extra_args, prompt_text, startup_wait=6, response_wait=8):
     except OSError:
         pass
 
+    # Now that the process has exited, the session file is flushed: verify a new
+    # assistant turn was recorded and log its token usage (cache read vs write).
+    entries = _assistant_entries(session_id)
+    completed = len(entries) > baseline
+    if completed:
+        usage = entries[-1].get("message", {}).get("usage", {})
+        text = ""
+        for block in entries[-1].get("message", {}).get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+        limited = "hit your" in text.lower()
+        log("Turn confirmed{}: cache_read={} cache_write={} in={} out={}".format(
+            " [RATE-LIMITED]" if limited else "",
+            usage.get("cache_read_input_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0)))
+    else:
+        log("WARNING: no new assistant turn recorded — the ping may not have counted.")
+
     log(f"Exited with code: {proc.returncode}")
-    return proc.returncode == 0
+    return completed
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +298,7 @@ def init():
     checkpoint_id = str(uuid.uuid4())
     log(f"Creating checkpoint session {checkpoint_id[:8]}... with 'hi'")
 
-    ok = run_interactive(["--session-id", checkpoint_id], "hi")
+    ok = run_interactive(["--session-id", checkpoint_id], "hi", checkpoint_id)
     if not ok:
         log("ERROR: Failed to create checkpoint session.")
         sys.exit(1)
@@ -233,7 +330,9 @@ def main():
     restore_checkpoint(checkpoint_id)
 
     log(f"Resuming checkpoint {checkpoint_id[:8]}... with 'how are you?'")
-    run_interactive(["--resume", checkpoint_id], "how are you?")
+    ok = run_interactive(["--resume", checkpoint_id], "how are you?", checkpoint_id)
+    if not ok:
+        log("WARNING: extra-window run did not confirm a completed turn.")
     log("Extra-window run finished.\n")
 
 

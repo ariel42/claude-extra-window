@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
-# install.sh — set up and deploy claude-extra-window.
-# Creates the initial checkpoint session if needed, then installs the systemd timer.
-# Requires sudo for the systemd steps.
+# install.sh — set up and deploy claude-extra-window as a systemd *user* service.
+# Creates the initial checkpoint session if needed, then installs a user timer.
+#
+# A user service (rather than a system service) is used deliberately: it runs in
+# your own login/session context, so it inherits the D-Bus session and keyring
+# needed for keychain-based Claude OAuth, and it never needs sudo to manage.
+# The only privileged step is enabling "linger" so the timer keeps firing while
+# you are logged out — and that is attempted gracefully.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURRENT_USER="$(whoami)"
-SYSTEMD_DIR="/etc/systemd/system"
+USER_UNIT_DIR="$HOME/.config/systemd/user"
+
+# Ping interval. Chosen to sit just under Claude Code's ~1-hour prompt-cache TTL
+# so every ping is served as a (rate-limit-exempt) cache read. See README.
+INTERVAL_MIN=59
 
 echo "Claude Code Extra Window — Install"
 echo "===================================="
 
-# ── Prerequisites ────────────────────────────────────────────────────────────
+# ── Make sure systemctl --user is reachable from this shell ───────────────────
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# ── Prerequisites ─────────────────────────────────────────────────────────────
 
 if ! command -v python3 &>/dev/null; then
     echo "ERROR: python3 not found. Install Python 3.6 or later." >&2
@@ -31,8 +43,8 @@ if [ ! -x "$CLAUDE_BIN" ]; then
     exit 1
 fi
 
-if ! command -v sudo &>/dev/null; then
-    echo "ERROR: sudo is required to write to $SYSTEMD_DIR." >&2
+if ! command -v systemctl &>/dev/null; then
+    echo "ERROR: systemctl not found — this tool requires systemd." >&2
     exit 1
 fi
 
@@ -40,7 +52,7 @@ echo "  python : $(python3 --version)"
 echo "  claude : $("$CLAUDE_BIN" --version 2>/dev/null || echo 'version unknown')"
 echo ""
 
-# ── Checkpoint session (one-time) ────────────────────────────────────────────
+# ── Checkpoint session (one-time) ─────────────────────────────────────────────
 
 if [ -f "$SCRIPT_DIR/extra_window_session_id.txt" ] && \
    [ -f "$SCRIPT_DIR/extra_window_checkpoint.jsonl.bak" ]; then
@@ -60,51 +72,65 @@ else
 fi
 echo ""
 
-# ── Systemd deployment ───────────────────────────────────────────────────────
+# ── Systemd user units ────────────────────────────────────────────────────────
 
-echo "Deploying systemd service and timer..."
+echo "Deploying systemd user service and timer..."
+mkdir -p "$USER_UNIT_DIR"
 
-sudo tee "$SYSTEMD_DIR/claude-extra-window.service" > /dev/null << EOF
+cat > "$USER_UNIT_DIR/claude-extra-window.service" << EOF
 [Unit]
 Description=Claude Code Extra Window
-After=network.target
 
 [Service]
 Type=oneshot
-User=$CURRENT_USER
 WorkingDirectory=$SCRIPT_DIR
 ExecStart=/usr/bin/python3 $SCRIPT_DIR/claude_extra_window.py
-Environment=HOME=$HOME
+# PATH so the script can locate the claude CLI; HOME is provided by the user manager.
 Environment=PATH=$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=TERM=xterm-256color
-Environment=USER=$CURRENT_USER
-Environment=SHELL=/bin/bash
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 EOF
 
-sudo tee "$SYSTEMD_DIR/claude-extra-window.timer" > /dev/null << 'EOF'
+cat > "$USER_UNIT_DIR/claude-extra-window.timer" << EOF
 [Unit]
-Description=Claude Code Extra Window — ping every 59 minutes
+Description=Claude Code Extra Window — ping every ${INTERVAL_MIN} minutes
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=59min
+# OnActiveSec fires shortly after the timer starts (relative to timer activation,
+# so it works regardless of how long the user manager has been up); OnUnitActiveSec
+# then repeats every INTERVAL_MIN after each run completes.
+OnActiveSec=1min
+OnUnitActiveSec=${INTERVAL_MIN}min
+Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
-sudo systemctl daemon-reload
-sudo systemctl enable claude-extra-window.timer
-sudo systemctl restart claude-extra-window.timer
 
-# ── Done ─────────────────────────────────────────────────────────────────────
+systemctl --user daemon-reload
+systemctl --user enable claude-extra-window.timer
+systemctl --user restart claude-extra-window.timer
+
+# Keep the timer firing while logged out (best-effort; needs privilege).
+if ! loginctl show-user "$CURRENT_USER" 2>/dev/null | grep -q "Linger=yes"; then
+    echo "Enabling linger so the timer runs while you are logged out..."
+    if command -v sudo &>/dev/null && sudo loginctl enable-linger "$CURRENT_USER" 2>/dev/null; then
+        echo "  Linger enabled."
+    elif loginctl enable-linger "$CURRENT_USER" 2>/dev/null; then
+        echo "  Linger enabled."
+    else
+        echo "  WARNING: could not enable linger. The timer will only run while you"
+        echo "           are logged in. To fix: sudo loginctl enable-linger $CURRENT_USER"
+    fi
+fi
+
+# ── Done ──────────────────────────────────────────────────────────────────────
 
 echo ""
 echo "Installed successfully."
 echo ""
-systemctl status claude-extra-window.timer --no-pager
+systemctl --user status claude-extra-window.timer --no-pager || true
 echo ""
 echo "Logs : $SCRIPT_DIR/claude_extra_window.log"
 echo ""

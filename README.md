@@ -1,67 +1,78 @@
 # claude-extra-window
 
-A lightweight systemd service that gives you an extra Claude Code usage window by keeping a background session ticking around the clock, so a fresh full window is always imminent when you sit down to work.
+A lightweight systemd user service that keeps a Claude Code usage window rolling in the background, so that when you sit down to work you begin inside a fresh, almost-untouched window — and the next reset lands during your working hours rather than after them.
 
 ## Background
 
-Claude Code subscriptions operate within a rolling 5-hour usage window. If you have not been using Claude Code, the window has not started — it begins the moment you open a session and runs from there. Start working at 9 am with no prior activity, and by 2 pm you may hit the limit in the middle of your most productive hours.
+Claude Code subscriptions meter usage in a rolling **5-hour window**. The window does not follow a fixed clock: it starts the moment you send your first prompt and resets five hours later. Begin work at 9 am with no prior activity and your window runs 9 am–2 pm — so you may exhaust it in the middle of your most productive hours.
 
-This tool runs a minimal background session around the clock, sending a short ping every 59 minutes. By the time you sit down to work, two things are true simultaneously:
+A common manual workaround is to send a throwaway message earlier in the day, shifting the window — and its reset — to a more convenient time. This tool automates that idea and runs it around the clock.
 
-1. **The current usage window is nearly expired.** It has been ticking since the overnight session began, so a fresh full 5-hour window is imminent — often within the next hour.
-2. **The current window is nearly untouched.** Because each run reuses the exact same frozen 2-turn session and reads from Anthropic's prompt cache, actual token consumption overnight is negligible. The window is old in time, but still almost entirely full in capacity.
+Every 59 minutes it sends a tiny ping from a single reused session. The pings cost almost nothing against your usage (see [How the timing works](#how-the-timing-works)), but they keep your windows continuously rolling. As a result, when you start work:
 
-The result is two adjacent periods of effectively full capacity: the barely-consumed remainder of the current window, immediately followed by the fresh window that resets shortly after you start. You open your own new work session as normal; the background session runs entirely in the background and is never something you interact with directly.
+- you are already inside a window that is **nearly untouched**, because the overnight pings consume almost none of it; and
+- because windows have been resetting on a steady cadence, **a fresh window reliably resets during your working hours**, giving you more usable capacity across the day.
+
+The background session is never something you interact with; you open your own Claude Code sessions as usual.
 
 ## How it works
 
-1. **Setup** creates a frozen checkpoint: a single interactive Claude session containing just `hi` → response. The session file is backed up at this state and never modified again.
-2. **Every 59 minutes**, the systemd timer runs the script, which:
-   - Restores the session file to the frozen checkpoint (always just the original `hi` state)
-   - Resumes that session and sends `how are you?`
-   - Exits cleanly
-3. Because the checkpoint is always restored before resuming, the server sees a fixed 2-turn context on every run — messages never accumulate, and token cost stays constant regardless of how long the tool has been running.
-
-The 59-minute interval is deliberate: Anthropic caches session context for one hour. Running just under that threshold keeps the cache warm on every ping, so the cached system prompt is read rather than reprocessed on each run.
-
-Sessions run in **interactive mode** (not `--print`), so they count against the subscription usage window rather than API billing.
+1. **Setup** creates a frozen checkpoint — a single session containing just `hi` → response — and backs up the session file in that state.
+2. **Every 59 minutes** a systemd user timer runs the script, which:
+   - restores the session file to the frozen checkpoint,
+   - resumes the session and sends `how are you?`,
+   - waits for the reply, then exits.
+3. Because the checkpoint is restored before every run, the session never grows: the server always sees the same two-turn conversation, so the cost of a ping stays constant no matter how long the tool has been running.
 
 ## Features
 
-- **Minimal token cost** — `--tools ""` strips tool definitions from the system prompt; Anthropic's 1-hour prompt cache is kept warm by the 59-minute interval, so each run reads from cache rather than reprocessing
-- **Constant context size** — a frozen checkpoint is restored before every run, so the server always sees exactly the same 2-turn session; context never grows no matter how long the tool has been running
-- **Single reused session** — the same session ID is used on every run; the session history on disk is always restored to the frozen `hi` state before resuming, so there is effectively no accumulation
-- **Automatic log rotation** — log trimmed to the last 48 hours on each run, with run separators preserved
-- **No dependencies** — pure Python standard library; no pip installs required
-- **Fully generic** — all paths are derived at runtime from the script location and current user; no hardcoded values
+- **Negligible usage cost** — the reused prompt is served from Anthropic's prompt cache, and cache reads are not charged against your usage window, so in practice only about 110 tokens per ping are actually counted. See [How the timing works](#how-the-timing-works).
+- **Minimal footprint** — each ping disables all built-in tools (`--tools ""`) and MCP servers (`--strict-mcp-config`) and uses the smallest model (`--model haiku --effort low`), keeping the request to roughly 15K cached tokens.
+- **Constant size** — a frozen checkpoint is restored before every run, so neither the on-disk session nor the context sent to the server ever accumulates.
+- **Confirmed pings** — every run verifies that the turn actually completed and records its token cost (cache read vs. write) in the log, so a failed ping is visible rather than silently assumed to have worked.
+- **Runs as a systemd user service** — no root-owned units, and no `sudo` to install or manage it. `sudo` is used only — and optionally — to enable linger so the timer keeps running while you are logged out.
+- **Keychain-friendly** — runs inside your user session, so OAuth credentials held in the system keyring are available without extra configuration.
+- **Self-contained** — pure Python standard library with no dependencies to install; all paths are derived at runtime, with nothing hardcoded.
+- **Automatic log rotation** — the log is trimmed to the most recent 48 hours on each run.
 
 ## Requirements
 
 - Linux with systemd
 - Python 3.6 or later
-- [Claude Code CLI](https://claude.ai/download) installed and authenticated
+- [Claude Code CLI](https://claude.ai/download), installed and signed in to a **Pro or Max subscription** (see [Billing](#billing-subscription-vs-api))
 
 ## Quick start
 
 ```bash
 git clone <repo-url>
 cd claude-extra-window
-
 chmod +x install.sh uninstall.sh
 ./install.sh
 ```
 
-`install.sh` handles everything in one step: prerequisite checks, checkpoint session creation, and systemd deployment. The timer starts immediately and runs every 59 minutes.
+`install.sh` runs the prerequisite checks, creates the checkpoint session, and installs the systemd user timer. The timer starts immediately and fires every 59 minutes.
+
+## Managing the service
+
+```bash
+systemctl --user status claude-extra-window.timer        # status and next run time
+systemctl --user list-timers claude-extra-window.timer
+journalctl --user -u claude-extra-window.service         # service output
+```
+
+Each run is also recorded in `claude_extra_window.log`.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `claude_extra_window.py` | Main script. Runs as the systemd service; `--init` flag for setup. |
-| `install.sh` | One-step install: prereq checks, checkpoint init, systemd deployment. |
-| `uninstall.sh` | Removes the systemd units. Runtime files are left in place. |
+| `claude_extra_window.py` | Main script. Run with `--init` for one-time setup; otherwise performs a single ping. |
+| `install.sh` | One-step install: prerequisite checks, checkpoint creation, and timer deployment. |
+| `uninstall.sh` | Removes the systemd user units; leaves runtime files in place. |
 
-### Runtime files (gitignored, created by install.sh)
+The systemd units are installed to `~/.config/systemd/user/` and managed with `systemctl --user`.
+
+### Runtime files (created by install.sh, gitignored)
 
 | File | Purpose |
 |---|---|
@@ -71,7 +82,7 @@ chmod +x install.sh uninstall.sh
 
 ## Resetting the checkpoint
 
-To start fresh (e.g. if the session becomes invalid):
+If the checkpoint session becomes invalid, recreate it:
 
 ```bash
 rm extra_window_session_id.txt extra_window_checkpoint.jsonl.bak
@@ -84,17 +95,45 @@ rm extra_window_session_id.txt extra_window_checkpoint.jsonl.bak
 ./uninstall.sh
 ```
 
-To also remove runtime files (checkpoint, session ID, log):
+To also remove the runtime files:
 
 ```bash
 rm -f extra_window_session_id.txt extra_window_checkpoint.jsonl.bak claude_extra_window.log
 ```
 
-## Notes
+## Billing: subscription vs. API
 
-- This tool is not affiliated with or endorsed by Anthropic.
-- It relies on the Claude Code CLI's session storage format (`~/.claude/projects/`), which is an implementation detail that may change in future versions.
-- Only tested on Linux with systemd. Does not support macOS launchd or Windows.
+Whether usage counts against your subscription or your pay-as-you-go API account is decided by **authentication**, not by which mode the CLI runs in:
+
+- The tool is only useful when Claude Code is signed in to a **Pro or Max subscription** (OAuth). Under API-key authentication the pings would be billed per token, and the tool serves no purpose.
+- If `ANTHROPIC_API_KEY` is set, the CLI prefers it and bills the API account. The script runs Claude with a clean environment that omits `ANTHROPIC_API_KEY`, keeping pings on your subscription.
+- Pings run in interactive mode rather than `--print`, because `claude --print` under OAuth has a reported issue where it can be billed as API usage ([anthropics/claude-code#43333](https://github.com/anthropics/claude-code/issues/43333)).
+
+## Notes and caveats
+
+- This project is not affiliated with or endorsed by Anthropic. Running an automated background process against a subscription around the clock may conflict with Anthropic's terms of service; use it at your own discretion.
+- Pings are cheap but not free. They also draw a small amount from the separate **7-day** usage limit (roughly 24 pings per day).
+- The tool depends on the Claude Code session-storage layout under `~/.claude/projects/`, an internal detail that could change in future CLI releases.
+- Tested on Linux with systemd only; macOS and Windows are not supported.
+
+## How the timing works
+
+The 59-minute interval is chosen to take advantage of one specific property of Anthropic's prompt caching:
+
+> Cache reads are not deducted from your rate limit. — [Anthropic documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+
+Because every ping reuses the *identical* frozen session, the bulk of the request — roughly 15K tokens of system prompt — is byte-for-byte the same each time and is served from the prompt cache. A cache **read** is not counted against your usage window; only the few new tokens (`how are you?` and the short reply) are. A cached ping therefore costs on the order of 110 counted tokens, with the ~15K-token prompt riding along for free.
+
+The constraint is the cache lifetime. Anthropic's documented default is a 5-minute TTL, with a 1-hour option, set server-side. In practice, Claude Code sessions are cached for about an hour, and each successful read refreshes that lifetime — across several days of hourly pings, the large majority were served as pure cache reads. The 59-minute interval sits just under the hour so the cache stays warm from one ping to the next.
+
+That makes 59 minutes a practical sweet spot:
+
+- **Pinging more often** gains nothing — hourly pings are already free — while increasing request volume and counted output tokens.
+- **Pinging less often than ~1 hour** lets the cache lapse, turning each ping into a ~15K-token cache **write**, which *is* counted against your window.
+
+The interval is defined in one place: `INTERVAL_MIN` in `install.sh` (which sets the timer's `OnUnitActiveSec`). Each run logs `cache_read` versus `cache_write`, so you can confirm pings are being served from cache; if the effective cache lifetime ever changes, adjust the interval to match.
+
+Independently of caching, the hourly cadence is what keeps your usage windows continuously rolling, so that a reset lands during your working hours.
 
 ## License
 
