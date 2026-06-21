@@ -2,6 +2,8 @@
 
 A lightweight systemd user service that keeps a Claude Code usage window rolling in the background, so that when you sit down to work you begin inside a fresh, almost-untouched window — and the next reset lands during your working hours rather than after them.
 
+It deliberately drives the **interactive** Claude CLI rather than `claude -p`, which is what keeps each ping counting against your subscription's usage window — see [Billing](#billing-subscription-vs-api).
+
 ## Background
 
 Claude Code subscriptions meter usage in a rolling **5-hour window**. The window does not follow a fixed clock: it starts the moment you send your first prompt and resets five hours later. Begin work at 9 am with no prior activity and your window runs 9 am–2 pm — so you may exhaust it in the middle of your most productive hours.
@@ -20,12 +22,13 @@ The background session is never something you interact with; you open your own C
 1. **Setup** creates a frozen checkpoint — a single session containing just `hi` → response — and backs up the session file in that state.
 2. **Every 59 minutes** a systemd user timer runs the script, which:
    - restores the session file to the frozen checkpoint,
-   - resumes the session and sends `how are you?`,
+   - resumes the session **in interactive mode** (not `claude -p`) and sends `how are you?`,
    - waits for the reply, then exits.
 3. Because the checkpoint is restored before every run, the session never grows: the server always sees the same two-turn conversation, so the cost of a ping stays constant no matter how long the tool has been running.
 
 ## Features
 
+- **Subscription-safe by design** — drives the *interactive* Claude CLI, not `claude -p`. The print/headless path has a billing bug that can charge API rates even under a subscription ([#43333](https://github.com/anthropics/claude-code/issues/43333)), and Anthropic's announced (currently paused) change would move `claude -p`, the Agent SDK, and GitHub Actions usage off subscription limits entirely. Interactive terminal usage stays on the subscription, so the pings keep doing their job. See [Billing](#billing-subscription-vs-api).
 - **Negligible usage cost** — the reused prompt is served from Anthropic's prompt cache, and cache reads are not charged against your usage window, so in practice only about 110 tokens per ping are actually counted. See [How the timing works](#how-the-timing-works).
 - **Minimal footprint** — each ping disables all built-in tools (`--tools ""`) and MCP servers (`--strict-mcp-config`) and uses the smallest model (`--model haiku --effort low`), keeping the request to roughly 15K cached tokens.
 - **Constant size** — a frozen checkpoint is restored before every run, so neither the on-disk session nor the context sent to the server ever accumulates.
