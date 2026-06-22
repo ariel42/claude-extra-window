@@ -102,6 +102,10 @@ Description=Claude Code Extra Window — ping every ${INTERVAL_MIN} minutes
 # then repeats every INTERVAL_MIN after each run completes.
 OnActiveSec=1min
 OnUnitActiveSec=${INTERVAL_MIN}min
+# systemd's default accuracy is 1 minute, which rounds the interval up to the next
+# minute boundary and turns 59min into an effective ~60min cadence. Tighten it so
+# the interval stays just under the ~1h prompt-cache TTL as intended.
+AccuracySec=1s
 Persistent=true
 
 [Install]
