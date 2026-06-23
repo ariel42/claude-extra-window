@@ -1,8 +1,8 @@
 # claude-extra-window
 
-A lightweight systemd user service that keeps a Claude Code usage window rolling in the background, so that when you sit down to work you begin inside a fresh, almost-untouched window — and the next reset lands during your working hours rather than after them.
+A lightweight systemd user service that keeps your Claude Code 5-hour usage window rolling in the background. The payoff: whenever you sit down to work, you start with a **full window's capacity** already available and — on average — only about **2.5 hours** until it refreshes into the next full window. That's roughly **half** the up-to-5-hour wait you'd otherwise face when a window only starts the moment you do.
 
-It deliberately drives the **interactive** Claude CLI rather than `claude -p`, which is what keeps each ping counting against your subscription's usage window — see [Billing](#billing-subscription-vs-api).
+Under the hood it drives the **interactive** Claude CLI (not `claude -p`), which is what keeps each ping on your subscription's usage window rather than billing the API — see [Billing](#billing-subscription-vs-api).
 
 ## Background
 
@@ -30,9 +30,9 @@ The background session is never something you interact with; you open your own C
 
 ## Features
 
+- **Half the wait for a fresh window (the main payoff)** — you almost always sit down inside a nearly-untouched window, so full capacity is available immediately and the next reset arrives in about **2.5 hours** on average instead of 5 — roughly half the usual wait.
 - **Subscription-safe by design** — drives the *interactive* Claude CLI, not `claude -p`. The print/headless path has a billing bug that can charge API rates even under a subscription ([#43333](https://github.com/anthropics/claude-code/issues/43333)), and Anthropic's announced (currently paused) change would move `claude -p`, the Agent SDK, and GitHub Actions usage off subscription limits entirely. Interactive terminal usage stays on the subscription, so the pings keep doing their job. See [Billing](#billing-subscription-vs-api).
 - **Negligible usage cost** — the reused prompt is served from Anthropic's prompt cache, and cache reads are not charged against your usage window, so in practice only about 110 tokens per ping are actually counted. See [How the timing works](#how-the-timing-works).
-- **Shorter waits between resets** — because you almost always start inside a nearly-full window, the next full-capacity reset arrives in about 2.5 hours on average, rather than the 5 hours you'd wait if the window only started when you sat down — roughly half the wait. Full capacity is available immediately either way.
 - **Minimal footprint** — each ping disables all built-in tools (`--tools ""`) and MCP servers (`--strict-mcp-config`) and uses the smallest model (`--model haiku --effort low`), keeping the request to roughly 15K cached tokens.
 - **Constant size** — a frozen checkpoint is restored before every run, so neither the on-disk session nor the context sent to the server ever accumulates.
 - **Confirmed pings** — every run verifies that the turn actually completed and records its token cost (cache read vs. write) in the log, so a failed ping is visible rather than silently assumed to have worked.
