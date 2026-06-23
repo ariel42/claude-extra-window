@@ -28,6 +28,8 @@ The background session is never something you interact with; you open your own C
    - waits for the reply, then exits.
 3. Because the checkpoint is restored before every run, the session never grows: the server always sees the same two-turn conversation, so the cost of a ping stays constant no matter how long the tool has been running.
 
+Since you sit down at an arbitrary point in this rolling cycle, the time left on the current window when you start can be anything from 0 to 5 hours — 2.5 hours is the average, not a guarantee. The window is nearly untouched either way, so its full capacity is available regardless of how much time is left before it resets.
+
 ## Features
 
 - **Half the wait for a fresh window (the main payoff)** — you almost always sit down inside a nearly-untouched window, so full capacity is available immediately and the next reset arrives in about **2.5 hours** on average instead of 5 — roughly half the usual wait.
