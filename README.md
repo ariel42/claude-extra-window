@@ -10,7 +10,7 @@ Claude Code subscriptions meter usage in a rolling **5-hour window**. The window
 
 A common manual workaround is to send a throwaway message earlier in the day, shifting the window — and its reset — to a more convenient time. This tool automates that idea and runs it around the clock.
 
-Every 59 minutes it sends a tiny ping from a single reused session. The pings cost almost nothing against your usage (see [How the timing works](#how-the-timing-works)), but they keep your windows continuously rolling. As a result, when you start work:
+Every 30 minutes it sends a tiny ping from a single reused session. The pings cost almost nothing against your usage (see [How the timing works](#how-the-timing-works)), but they keep your windows continuously rolling. As a result, when you start work:
 
 - you are already inside a window that is **nearly untouched**, because the overnight pings consume almost none of it; and
 - because windows have been resetting on a steady cadence, **a fresh window reliably resets during your working hours**, giving you more usable capacity across the day.
@@ -20,7 +20,7 @@ The background session is never something you interact with; you open your own C
 ## How it works
 
 1. **Setup** creates a frozen checkpoint — a single session containing just `hi` → response — and backs up the session file in that state.
-2. **Every 59 minutes** a systemd user timer runs the script, which:
+2. **Every 30 minutes** a systemd user timer runs the script, which:
    - restores the session file to the frozen checkpoint,
    - resumes the session **in interactive mode** (not `claude -p`) and sends `how are you?`,
    - waits for the reply, then exits.
@@ -53,7 +53,7 @@ chmod +x install.sh uninstall.sh
 ./install.sh
 ```
 
-`install.sh` runs the prerequisite checks, creates the checkpoint session, and installs the systemd user timer. The timer starts immediately and fires every 59 minutes.
+`install.sh` runs the prerequisite checks, creates the checkpoint session, and installs the systemd user timer. The timer starts immediately and fires every 30 minutes.
 
 ## Managing the service
 
@@ -121,22 +121,19 @@ Whether usage counts against your subscription or your pay-as-you-go API account
 
 ## How the timing works
 
-The 59-minute interval is chosen to take advantage of one specific property of Anthropic's prompt caching:
+The 30-minute interval balances two goals: keeping each ping free, and minimizing the gap between consecutive windows.
+
+**Keeping pings free.** Every ping reuses the *identical* frozen session, so the bulk of the request — roughly 15K tokens of system prompt — is byte-for-byte the same each time and is served from the prompt cache. And:
 
 > Cache reads are not deducted from your rate limit. — [Anthropic documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
 
-Because every ping reuses the *identical* frozen session, the bulk of the request — roughly 15K tokens of system prompt — is byte-for-byte the same each time and is served from the prompt cache. A cache **read** is not counted against your usage window; only the few new tokens (`how are you?` and the short reply) are. A cached ping therefore costs on the order of 110 counted tokens, with the ~15K-token prompt riding along for free.
+So a cached ping costs on the order of 110 counted tokens (the new `how are you?` plus the short reply), with the ~15K-token prompt riding along for free. The catch is the cache lifetime: Anthropic's documented default is a 5-minute TTL with a 1-hour option (server-controlled), but in practice Claude Code sessions are cached for about an hour and each read refreshes that lifetime. Any interval comfortably under ~1 hour keeps every ping a free read.
 
-The constraint is the cache lifetime. Anthropic's documented default is a 5-minute TTL, with a 1-hour option, set server-side. In practice, Claude Code sessions are cached for about an hour, and each successful read refreshes that lifetime — across several days of hourly pings, the large majority were served as pure cache reads. The 59-minute interval sits just under the hour so the cache stays warm from one ping to the next.
+**Minimizing the window gap.** A 5-hour window starts on your first prompt and resets exactly five hours later, and a new window only begins on the next ping *after* the previous one expires. If the interval doesn't divide evenly into five hours, that leaves a stretch with no active window — a 59-minute interval, for example, leaves a ~54-minute gap. **30 minutes divides the 5-hour window evenly**, so consecutive windows sit effectively back-to-back (a few minutes of scheduling jitter aside). That matters because it means when you sit down at a random time you almost always land *inside* an active, nearly-untouched window, with — on average — about **2.5 hours** until it resets into the next full window. (2.5 hours is the theoretical minimum for a 5-hour window with random arrival; any gap only pushes the average higher.)
 
-That makes 59 minutes a practical sweet spot:
+A 30-minute interval also adds resilience: a single missed ping (a transient error, or the machine asleep) no longer risks a long gap or a cold cache, because the next attempt is only 30 minutes away — still within the ~1-hour cache lifetime. The cost is ~48 tiny pings per day instead of ~24, which is still negligible.
 
-- **Pinging more often** gains nothing — hourly pings are already free — while increasing request volume and counted output tokens.
-- **Pinging less often than ~1 hour** lets the cache lapse, turning each ping into a ~15K-token cache **write**, which *is* counted against your window.
-
-The interval is defined in one place: `INTERVAL_MIN` in `install.sh` (which sets the timer's `OnUnitActiveSec`). Each run logs `cache_read` versus `cache_write`, so you can confirm pings are being served from cache; if the effective cache lifetime ever changes, adjust the interval to match.
-
-Independently of caching, the hourly cadence is what keeps your usage windows continuously rolling, so that a reset lands during your working hours.
+The interval is defined in one place: `INTERVAL_MIN` in `install.sh` (which sets the timer's `OnUnitActiveSec`). Each run logs `cache_read` versus `cache_write`, so you can confirm pings are being served from cache. If you'd rather halve the request count and don't mind a larger between-window gap, a value just under 60 also works (it stays within the cache lifetime); going *above* ~1 hour is the real mistake, since the cache would lapse and each ping would become a counted ~15K-token write.
 
 ## License
 

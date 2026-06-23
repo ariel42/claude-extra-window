@@ -13,9 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURRENT_USER="$(whoami)"
 USER_UNIT_DIR="$HOME/.config/systemd/user"
 
-# Ping interval. Chosen to sit just under Claude Code's ~1-hour prompt-cache TTL
-# so every ping is served as a (rate-limit-exempt) cache read. See README.
-INTERVAL_MIN=59
+# Ping interval (minutes). 30 divides the 5-hour window evenly, so consecutive
+# windows sit effectively back-to-back (no gap) — meaning you almost always land
+# inside an active, nearly-untouched window when you start work. It also stays well
+# under the ~1-hour prompt-cache TTL, so every ping is a (rate-limit-exempt) cache
+# read, with margin to survive a missed ping. See the README timing section.
+INTERVAL_MIN=30
 
 echo "Claude Code Extra Window — Install"
 echo "===================================="
