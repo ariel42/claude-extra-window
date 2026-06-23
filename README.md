@@ -15,6 +15,8 @@ Every 30 minutes it sends a tiny ping from a single reused session. The pings co
 - you are already inside a window that is **nearly untouched**, because the overnight pings consume almost none of it; and
 - because windows have been resetting on a steady cadence, **a fresh window reliably resets during your working hours**, giving you more usable capacity across the day.
 
+In practice this means you sit down with a full window's capacity already available and, on average, only about **2.5 hours** until it refreshes into the next full window — roughly **half** the 5-hour wait you'd face if the window had only started when you sat down.
+
 The background session is never something you interact with; you open your own Claude Code sessions as usual.
 
 ## How it works
@@ -30,6 +32,7 @@ The background session is never something you interact with; you open your own C
 
 - **Subscription-safe by design** — drives the *interactive* Claude CLI, not `claude -p`. The print/headless path has a billing bug that can charge API rates even under a subscription ([#43333](https://github.com/anthropics/claude-code/issues/43333)), and Anthropic's announced (currently paused) change would move `claude -p`, the Agent SDK, and GitHub Actions usage off subscription limits entirely. Interactive terminal usage stays on the subscription, so the pings keep doing their job. See [Billing](#billing-subscription-vs-api).
 - **Negligible usage cost** — the reused prompt is served from Anthropic's prompt cache, and cache reads are not charged against your usage window, so in practice only about 110 tokens per ping are actually counted. See [How the timing works](#how-the-timing-works).
+- **Shorter waits between resets** — because you almost always start inside a nearly-full window, the next full-capacity reset arrives in about 2.5 hours on average, rather than the 5 hours you'd wait if the window only started when you sat down — roughly half the wait. Full capacity is available immediately either way.
 - **Minimal footprint** — each ping disables all built-in tools (`--tools ""`) and MCP servers (`--strict-mcp-config`) and uses the smallest model (`--model haiku --effort low`), keeping the request to roughly 15K cached tokens.
 - **Constant size** — a frozen checkpoint is restored before every run, so neither the on-disk session nor the context sent to the server ever accumulates.
 - **Confirmed pings** — every run verifies that the turn actually completed and records its token cost (cache read vs. write) in the log, so a failed ping is visible rather than silently assumed to have worked.
