@@ -115,7 +115,7 @@ Whether usage counts against your subscription or your pay-as-you-go API account
 ## Notes and caveats
 
 - This project is not affiliated with or endorsed by Anthropic. Running an automated background process against a subscription around the clock may conflict with Anthropic's terms of service; use it at your own discretion.
-- Pings are cheap but not free. They also draw a small amount from the separate **7-day** usage limit (roughly 24 pings per day).
+- Pings are cheap but not free. They also draw a small amount from the separate **7-day** usage limit (roughly 48 pings per day).
 - The tool depends on the Claude Code session-storage layout under `~/.claude/projects/`, an internal detail that could change in future CLI releases.
 - Tested on Linux with systemd only; macOS and Windows are not supported.
 

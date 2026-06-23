@@ -311,7 +311,7 @@ def init():
 
 
 # ---------------------------------------------------------------------------
-# Extra-window run (called by systemd timer every 59 minutes)
+# Extra-window run (called by the systemd timer on each interval)
 # ---------------------------------------------------------------------------
 
 def main():
