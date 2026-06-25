@@ -329,8 +329,8 @@ def main():
     # context, regardless of what the previous run left behind.
     restore_checkpoint(checkpoint_id)
 
-    log(f"Resuming checkpoint {checkpoint_id[:8]}... with 'how are you?'")
-    ok = run_interactive(["--resume", checkpoint_id], "how are you?", checkpoint_id)
+    log(f"Resuming checkpoint {checkpoint_id[:8]}... with 'bye'")
+    ok = run_interactive(["--resume", checkpoint_id], "bye", checkpoint_id)
     if not ok:
         log("WARNING: extra-window run did not confirm a completed turn.")
     log("Extra-window run finished.\n")

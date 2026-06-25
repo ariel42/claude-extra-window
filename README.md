@@ -24,7 +24,7 @@ The background session is never something you interact with; you open your own C
 1. **Setup** creates a frozen checkpoint — a single session containing just `hi` → response — and backs up the session file in that state.
 2. **Every 30 minutes** a systemd user timer runs the script, which:
    - restores the session file to the frozen checkpoint,
-   - resumes the session **in interactive mode** (not `claude -p`) and sends `how are you?`,
+   - resumes the session **in interactive mode** (not `claude -p`) and sends `bye`,
    - waits for the reply, then exits.
 3. Because the checkpoint is restored before every run, the session never grows: the server always sees the same two-turn conversation, so the cost of a ping stays constant no matter how long the tool has been running.
 
@@ -34,7 +34,7 @@ Since you sit down at an arbitrary point in this rolling cycle, the time left on
 
 - **Half the wait for a fresh window (the main payoff)** — you almost always sit down inside a nearly-untouched window, so full capacity is available immediately and the next reset arrives in about **2.5 hours** on average instead of 5 — roughly half the usual wait.
 - **Subscription-safe by design** — drives the *interactive* Claude CLI, not `claude -p`. The print/headless path has a billing bug that can charge API rates even under a subscription ([#43333](https://github.com/anthropics/claude-code/issues/43333)), and Anthropic's announced (currently paused) change would move `claude -p`, the Agent SDK, and GitHub Actions usage off subscription limits entirely. Interactive terminal usage stays on the subscription, so the pings keep doing their job. See [Billing](#billing-subscription-vs-api).
-- **Negligible usage cost** — the reused prompt is served from Anthropic's prompt cache, and cache reads are not charged against your usage window, so in practice only about 110 tokens per ping are actually counted. See [How the timing works](#how-the-timing-works).
+- **Negligible usage cost** — the reused prompt is served from Anthropic's prompt cache, and cache reads are not charged against your usage window, so in practice only about 60 tokens per ping are actually counted. See [How the timing works](#how-the-timing-works).
 - **Minimal footprint** — each ping disables all built-in tools (`--tools ""`) and MCP servers (`--strict-mcp-config`) and uses the smallest model (`--model haiku --effort low`), keeping the request to roughly 15K cached tokens.
 - **Constant size** — a frozen checkpoint is restored before every run, so neither the on-disk session nor the context sent to the server ever accumulates.
 - **Confirmed pings** — every run verifies that the turn actually completed and records its token cost (cache read vs. write) in the log, so a failed ping is visible rather than silently assumed to have worked.
@@ -132,7 +132,7 @@ The 30-minute interval balances two goals: keeping each ping free, and minimizin
 
 > Cache reads are not deducted from your rate limit. — [Anthropic documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
 
-So a cached ping costs on the order of 110 counted tokens (the new `how are you?` plus the short reply), with the ~15K-token prompt riding along for free. The catch is the cache lifetime: Anthropic's documented default is a 5-minute TTL with a 1-hour option (server-controlled), but in practice Claude Code sessions are cached for about an hour and each read refreshes that lifetime. Any interval comfortably under ~1 hour keeps every ping a free read.
+So a cached ping costs on the order of 60 counted tokens (the new `bye` plus the short reply), with the ~15K-token prompt riding along for free. The catch is the cache lifetime: Anthropic's documented default is a 5-minute TTL with a 1-hour option (server-controlled), but in practice Claude Code sessions are cached for about an hour and each read refreshes that lifetime. Any interval comfortably under ~1 hour keeps every ping a free read.
 
 **Minimizing the window gap.** A 5-hour window starts on your first prompt and resets exactly five hours later, and a new window only begins on the next ping *after* the previous one expires. If the interval doesn't divide evenly into five hours, that leaves a stretch with no active window — a 59-minute interval, for example, leaves a ~54-minute gap. **30 minutes divides the 5-hour window evenly**, so consecutive windows sit effectively back-to-back (a few minutes of scheduling jitter aside). That matters because it means when you sit down at a random time you almost always land *inside* an active, nearly-untouched window, with — on average — about **2.5 hours** until it resets into the next full window. (2.5 hours is the theoretical minimum for a 5-hour window with random arrival; any gap only pushes the average higher.)
 
